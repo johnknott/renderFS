@@ -1,0 +1,12 @@
+[tools]
+go = "1.25.3"
+"aqua:golangci/golangci-lint" = "latest"
+
+[env]
+# Add any project‑wide env vars here
+
+[tasks.fmt]
+run = "go fmt ./..."
+
+[tasks.test]
+run = "go test ./..."
