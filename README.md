@@ -1,6 +1,6 @@
 # RenderFS
 
-RenderFS is a lightweight Go library for rendering project templates from any `fs.FS` source onto disk using the [Pongo2](https://github.com/flosch/pongo2) templating engine. It powers templated copies for the Stencil scaffolder while keeping the core rendering logic fast, deterministic, and test friendly.
+RenderFS is a lightweight Go library for rendering project templates from any `fs.FS` source onto disk using the [Pongo2](https://github.com/flosch/pongo2) templating engine. It powers templated copies for the Stencil scaffolder while keeping the core rendering logic fast, deterministic, and test friendly. We took inspiration from the excellent [copier](https://github.com/copier-org/copier) project, but wanted something Go-native, dependency-free, and small enough to embed in other tooling.
 
 ## Features
 
@@ -17,32 +17,83 @@ RenderFS is a lightweight Go library for rendering project templates from any `f
 go get github.com/your-org/renderfs
 ```
 
-## Example
+## Examples
+
+### Embedded templates (`//go:embed`)
+
+Most Stencil integrations ship templates inside the binary. RenderFS can work directly with an embedded filesystem:
+
+```go
+package main
+
+import (
+	"embed"
+	"fmt"
+
+	"github.com/flosch/pongo2/v6"
+	"github.com/your-org/renderfs"
+)
+
+//go:embed templates/**
+var templateFS embed.FS
+
+func main() {
+	opts := renderfs.Options{
+		Context: pongo2.Context{
+			"project_name": "My Awesome App",
+			"params": pongo2.Context{
+				"app_name":   "awesome_app",
+				"use_docker": true,
+			},
+		},
+		OnConflict: renderfs.Fail,
+	}
+
+	if err := renderfs.Copy(templateFS, "./output", opts); err != nil {
+		panic(err)
+	}
+
+	fmt.Println("Scaffolding complete!")
+}
+```
+
+With the following embedded files:
+
+```
+templates/
+├─ README.md.jinja
+├─ src/{{ params.app_name }}/main.go.tmpl
+└─ {% if params.use_docker %}compose.yaml{% endif %}
+```
+
+The rendered tree will be:
+
+```
+output/
+├─ README.md
+├─ compose.yaml              # Only when params.use_docker == true
+└─ src/
+   └─ awesome_app/
+      └─ main.go
+```
+
+### Local directory templates (`os.DirFS`)
+
+You can also render straight from a directory on disk—handy during development before baking templates into the binary:
 
 ```go
 package main
 
 import (
 	"fmt"
-	"io/fs"
-	"testing/fstest"
+	"os"
 
 	"github.com/flosch/pongo2/v6"
 	"github.com/your-org/renderfs"
 )
 
 func main() {
-	source := fstest.MapFS{
-		"README.md.jinja": {
-			Data: []byte("Project: {{ project_name }}\n"),
-		},
-		"src/{{ params.app_name }}/main.go.tmpl": {
-			Data: []byte("package {{ params.app_name }}\n"),
-		},
-		"{% if params.use_docker %}compose.yaml{% endif %}": {
-			Data: []byte("version: '3.8'\n"),
-		},
-	}
+	source := os.DirFS("./template-src")
 
 	opts := renderfs.Options{
 		Context: pongo2.Context{
@@ -63,17 +114,7 @@ func main() {
 }
 ```
 
-Running the example will create the following files:
-
-```
-output/
-├─ README.md                   # Rendered from README.md.jinja
-└─ src/
-   └─ awesome_app/
-      └─ main.go               # Rendered from main.go.tmpl
-```
-
-`compose.yaml` is only created when `params.use_docker` is truthy.
+The directory `template-src` can then be committed alongside your project and exercised or updated without re-building the binary.
 
 ## Ignore Patterns
 
@@ -107,4 +148,3 @@ mise run build  # go build ./...
 ## License
 
 MIT © Your Org
-
