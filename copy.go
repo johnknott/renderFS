@@ -3,24 +3,26 @@ package renderfs
 import (
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
-	"os"
 	"path"
-	"path/filepath"
-	"sort"
 	"strings"
 
 	"github.com/flosch/pongo2/v6"
 )
 
+type statWriter interface {
+	Lstat(path string) (fs.FileInfo, error)
+}
+
 // Copy walks the source filesystem, renders templates for paths and file
-// contents, and writes the result to destPath.
-func Copy(source fs.FS, destPath string, opts Options) error {
+// contents, and writes the result to the provided Writer.
+func Copy(source fs.FS, dest Writer, opts Options) error {
 	if source == nil {
 		return fmt.Errorf("renderfs: source filesystem is required")
 	}
-	if destPath == "" {
-		return fmt.Errorf("renderfs: destination path is required")
+	if dest == nil {
+		return fmt.Errorf("renderfs: destination writer is required")
 	}
 
 	context := opts.Context
@@ -38,18 +40,7 @@ func Copy(source fs.FS, destPath string, opts Options) error {
 		return err
 	}
 
-	destAbs, err := filepath.Abs(destPath)
-	if err != nil {
-		return fmt.Errorf("renderfs: resolve destination: %w", err)
-	}
-
-	if err := createDirectory(destAbs); err != nil {
-		return err
-	}
-
-	dirModes := make(map[string]fs.FileMode)
-
-	err = fs.WalkDir(source, ".", func(rel string, d fs.DirEntry, walkErr error) error {
+	return fs.WalkDir(source, ".", func(rel string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
@@ -87,17 +78,33 @@ func Copy(source fs.FS, destPath string, opts Options) error {
 			return nil
 		}
 
-		destFull, err := resolveDestinationPath(destAbs, renderedRel)
+		if d.IsDir() {
+			return dest.MkdirAll(renderedRel, directoryMode(info))
+		}
+
+		if info.Mode()&fs.ModeSymlink != 0 {
+			target, err := readSymlink(source, rel)
+			if err != nil {
+				return fmt.Errorf("renderfs: read symlink %s: %w", rel, err)
+			}
+			if err := dest.Symlink(target, renderedRel); err != nil {
+				return fmt.Errorf("renderfs: create symlink %s -> %s: %w", renderedRel, target, err)
+			}
+			return nil
+		}
+
+		proceed, err := handleConflict(dest, renderedRel, conflict)
 		if err != nil {
 			return err
 		}
-
-		if d.IsDir() {
-			if err := createDirectory(destFull); err != nil {
-				return err
-			}
-			dirModes[destFull] = directoryMode(info)
+		if !proceed {
 			return nil
+		}
+
+		if parent := path.Dir(renderedRel); parent != "." {
+			if err := dest.MkdirAll(parent, 0o755); err != nil {
+				return fmt.Errorf("renderfs: create parent %s: %w", parent, err)
+			}
 		}
 
 		content, err := fs.ReadFile(source, rel)
@@ -110,32 +117,20 @@ func Copy(source fs.FS, destPath string, opts Options) error {
 			return fmt.Errorf("renderfs: render file %s: %w", rel, err)
 		}
 
-		proceed, err := handleConflict(destFull, conflict)
-		if err != nil || !proceed {
-			return err
+		handle, err := dest.CreateFile(renderedRel, fileMode(info))
+		if err != nil {
+			return fmt.Errorf("renderfs: create %s: %w", renderedRel, err)
 		}
-
-		if err := createDirectory(filepath.Dir(destFull)); err != nil {
-			return err
+		if _, err := io.WriteString(handle, renderedContent); err != nil {
+			handle.Close()
+			return fmt.Errorf("renderfs: write %s: %w", renderedRel, err)
 		}
-
-		mode := fileMode(info)
-		if err := os.WriteFile(destFull, []byte(renderedContent), mode); err != nil {
-			return fmt.Errorf("renderfs: write %s: %w", destFull, err)
-		}
-
-		if err := os.Chmod(destFull, mode); err != nil {
-			return fmt.Errorf("renderfs: chmod %s: %w", destFull, err)
+		if err := handle.Close(); err != nil {
+			return fmt.Errorf("renderfs: close %s: %w", renderedRel, err)
 		}
 
 		return nil
 	})
-
-	if err != nil {
-		return err
-	}
-
-	return applyDirectoryModes(dirModes)
 }
 
 func renderRelativePath(rel string, isDir bool, ctx pongo2.Context) (string, bool, error) {
@@ -177,47 +172,32 @@ func stripTemplateSuffix(p string) string {
 	}
 }
 
-func resolveDestinationPath(destRoot, renderedRel string) (string, error) {
-	if renderedRel == "" {
-		return destRoot, nil
+func handleConflict(dest Writer, relPath string, resolution ConflictResolution) (bool, error) {
+	sw, ok := dest.(statWriter)
+	if !ok {
+		if resolution == Skip || resolution == Fail {
+			return false, fmt.Errorf("renderfs: destination writer does not support conflict detection for %s", relPath)
+		}
+		return true, nil
 	}
-	joined := filepath.Join(destRoot, filepath.FromSlash(renderedRel))
-	clean, err := filepath.Abs(joined)
+
+	info, err := sw.Lstat(relPath)
 	if err != nil {
-		return "", fmt.Errorf("renderfs: resolve rendered path: %w", err)
-	}
-
-	if clean != destRoot && !strings.HasPrefix(clean, destRoot+string(os.PathSeparator)) {
-		return "", fmt.Errorf("renderfs: rendered path %q escapes destination", renderedRel)
-	}
-	return clean, nil
-}
-
-func createDirectory(dir string) error {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return fmt.Errorf("renderfs: create directory %s: %w", dir, err)
-	}
-	return nil
-}
-
-func handleConflict(path string, resolution ConflictResolution) (bool, error) {
-	info, err := os.Lstat(path)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return true, nil
 		}
-		return false, fmt.Errorf("renderfs: stat destination %s: %w", path, err)
+		return false, fmt.Errorf("renderfs: stat destination %s: %w", relPath, err)
 	}
 
 	if info.IsDir() {
-		return false, fmt.Errorf("renderfs: destination %s is a directory", path)
+		return false, fmt.Errorf("renderfs: destination %s is a directory", relPath)
 	}
 
 	switch resolution {
 	case Skip:
 		return false, nil
 	case Fail:
-		return false, fmt.Errorf("renderfs: destination file %s exists", path)
+		return false, fmt.Errorf("renderfs: destination file %s exists", relPath)
 	default:
 		return true, nil
 	}
@@ -243,26 +223,9 @@ func fileMode(info fs.FileInfo) fs.FileMode {
 	return perm
 }
 
-func applyDirectoryModes(modes map[string]fs.FileMode) error {
-	if len(modes) == 0 {
-		return nil
+func readSymlink(source fs.FS, rel string) (string, error) {
+	if rl, ok := source.(fs.ReadLinkFS); ok {
+		return rl.ReadLink(rel)
 	}
-	paths := make([]string, 0, len(modes))
-	for dir := range modes {
-		paths = append(paths, dir)
-	}
-	sort.Slice(paths, func(i, j int) bool {
-		return len(paths[i]) > len(paths[j])
-	})
-
-	for _, dir := range paths {
-		mode := modes[dir]
-		if mode == 0 {
-			continue
-		}
-		if err := os.Chmod(dir, mode); err != nil {
-			return fmt.Errorf("renderfs: chmod directory %s: %w", dir, err)
-		}
-	}
-	return nil
+	return "", fmt.Errorf("renderfs: source filesystem does not support symlinks")
 }

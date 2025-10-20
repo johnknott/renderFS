@@ -1,13 +1,13 @@
-package renderfs
+package renderfs_test
 
 import (
 	"io/fs"
-	"os"
-	"path/filepath"
 	"testing"
 	"testing/fstest"
 
 	"github.com/flosch/pongo2/v6"
+	"github.com/your-org/renderfs"
+	"github.com/your-org/renderfs/writers"
 )
 
 func TestCopyBasicRendering(t *testing.T) {
@@ -28,8 +28,6 @@ func TestCopyBasicRendering(t *testing.T) {
 		},
 	}
 
-	dest := t.TempDir()
-
 	context := pongo2.Context{
 		"project_name": "RenderFS",
 		"params": pongo2.Context{
@@ -37,33 +35,28 @@ func TestCopyBasicRendering(t *testing.T) {
 		},
 	}
 
-	if err := Copy(source, dest, Options{Context: context}); err != nil {
+	writer := writers.NewMemoryWriter()
+
+	if err := renderfs.Copy(source, writer, renderfs.Options{Context: context}); err != nil {
 		t.Fatalf("Copy failed: %v", err)
 	}
 
-	readme, err := os.ReadFile(filepath.Join(dest, "README.md"))
-	if err != nil {
-		t.Fatalf("reading rendered README: %v", err)
-	}
-	if string(readme) != "Project: RenderFS\n" {
-		t.Fatalf("unexpected README content: %q", string(readme))
+	contents := writer.Contents()
+	if got := string(contents["README.md"]); got != "Project: RenderFS\n" {
+		t.Fatalf("unexpected README content: %q", got)
 	}
 
-	mainFile := filepath.Join(dest, "src", "demo", "main.go")
-	data, err := os.ReadFile(mainFile)
-	if err != nil {
-		t.Fatalf("reading rendered main.go: %v", err)
-	}
-	if string(data) != "package demo\n" {
-		t.Fatalf("unexpected main.go content: %q", string(data))
+	mainPath := "src/demo/main.go"
+	if got := string(contents[mainPath]); got != "package demo\n" {
+		t.Fatalf("unexpected main.go content: %q", got)
 	}
 
-	info, err := os.Stat(mainFile)
-	if err != nil {
-		t.Fatalf("stat rendered file: %v", err)
+	mode, ok := writer.FileMode(mainPath)
+	if !ok {
+		t.Fatalf("expected mode for %s", mainPath)
 	}
-	if info.Mode()&0o755 != 0o755 {
-		t.Fatalf("expected executable permissions, got %v", info.Mode())
+	if mode&0o755 != 0o755 {
+		t.Fatalf("expected executable permissions, got %v", mode)
 	}
 }
 
@@ -73,19 +66,19 @@ func TestCopySkipsConditionalPath(t *testing.T) {
 			Data: []byte("version: '3.8'\n"),
 		},
 	}
-	dest := t.TempDir()
+	writer := writers.NewMemoryWriter()
 	context := pongo2.Context{
 		"params": pongo2.Context{
 			"use_docker": false,
 		},
 	}
 
-	if err := Copy(source, dest, Options{Context: context}); err != nil {
+	if err := renderfs.Copy(source, writer, renderfs.Options{Context: context}); err != nil {
 		t.Fatalf("Copy failed: %v", err)
 	}
 
-	if _, err := os.Stat(filepath.Join(dest, "compose.yaml")); !os.IsNotExist(err) {
-		t.Fatalf("expected compose.yaml to be skipped, got err=%v", err)
+	if _, exists := writer.Contents()["compose.yaml"]; exists {
+		t.Fatalf("expected compose.yaml to be skipped")
 	}
 }
 
@@ -102,22 +95,22 @@ func TestCopyRespectsIgnorePatterns(t *testing.T) {
 		},
 	}
 
-	dest := t.TempDir()
+	writer := writers.NewMemoryWriter()
 
-	if err := Copy(source, dest, Options{Context: pongo2.Context{}}); err != nil {
+	if err := renderfs.Copy(source, writer, renderfs.Options{Context: pongo2.Context{}}); err != nil {
 		t.Fatalf("Copy failed: %v", err)
 	}
 
-	if _, err := os.Stat(filepath.Join(dest, "ignored.txt")); !os.IsNotExist(err) {
-		t.Fatalf("ignored file should not exist (err=%v)", err)
+	if _, ok := writer.Contents()["ignored.txt"]; ok {
+		t.Fatalf("ignored file should not exist")
 	}
 
-	if _, err := os.Stat(filepath.Join(dest, ".renderfs-ignore")); !os.IsNotExist(err) {
-		t.Fatalf(".renderfs-ignore should not be copied (err=%v)", err)
+	if _, ok := writer.Contents()[".renderfs-ignore"]; ok {
+		t.Fatalf(".renderfs-ignore should not be copied")
 	}
 
-	if _, err := os.Stat(filepath.Join(dest, "kept.txt")); err != nil {
-		t.Fatalf("expected kept.txt to exist: %v", err)
+	if _, ok := writer.Contents()["kept.txt"]; !ok {
+		t.Fatalf("expected kept.txt to exist")
 	}
 }
 
@@ -128,24 +121,24 @@ func TestCopyConflictHandling(t *testing.T) {
 		},
 	}
 
-	dest := t.TempDir()
-	target := filepath.Join(dest, "file.txt")
-	if err := os.WriteFile(target, []byte("original"), 0o644); err != nil {
+	writer := writers.NewMemoryWriter()
+	existing, err := writer.CreateFile("file.txt", 0o644)
+	if err != nil {
 		t.Fatalf("prepare destination file: %v", err)
 	}
+	if _, err := existing.Write([]byte("original")); err != nil {
+		t.Fatalf("write original: %v", err)
+	}
+	existing.Close()
 
-	if err := Copy(source, dest, Options{OnConflict: Skip}); err != nil {
+	if err := renderfs.Copy(source, writer, renderfs.Options{OnConflict: renderfs.Skip}); err != nil {
 		t.Fatalf("Copy with skip failed: %v", err)
 	}
-	data, err := os.ReadFile(target)
-	if err != nil {
-		t.Fatalf("read destination file: %v", err)
-	}
-	if string(data) != "original" {
-		t.Fatalf("expected original content preserved, got %q", string(data))
+	if got := string(writer.Contents()["file.txt"]); got != "original" {
+		t.Fatalf("expected original content preserved, got %q", got)
 	}
 
-	if err := Copy(source, dest, Options{OnConflict: Fail}); err == nil {
+	if err := renderfs.Copy(source, writer, renderfs.Options{OnConflict: renderfs.Fail}); err == nil {
 		t.Fatalf("expected failure when OnConflict=Fail")
 	}
 }
@@ -157,9 +150,9 @@ func TestCopyFailsOnMissingVariable(t *testing.T) {
 		},
 	}
 
-	dest := t.TempDir()
+	writer := writers.NewMemoryWriter()
 
-	err := Copy(source, dest, Options{Context: pongo2.Context{}})
+	err := renderfs.Copy(source, writer, renderfs.Options{Context: pongo2.Context{}})
 	if err == nil {
 		t.Fatalf("expected missing variable error")
 	}

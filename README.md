@@ -20,6 +20,7 @@ Because it accepts a generic `fs.FS`, you can feed RenderFS templates from:
 - Preserve source file permissions, including executable bits.
 - Fail fast when templates reference missing context variables (RenderFS validates referenced identifiers before handing them to Pongo2).
 - Conflict handling modes: overwrite, skip, or fail fast.
+- Pluggable `Writer` abstraction so you can target disk, memory, archives, or any custom sink.
 
 ## Installation
 
@@ -40,12 +41,18 @@ import (
 
 	"github.com/flosch/pongo2/v6"
 	"github.com/your-org/renderfs"
+	"github.com/your-org/renderfs/writers"
 )
 
 //go:embed templates/**
 var templateFS embed.FS
 
 func main() {
+	writer, err := writers.NewOSWriter("./output")
+	if err != nil {
+		panic(err)
+	}
+
 	opts := renderfs.Options{
 		Context: pongo2.Context{
 			"project_name": "My Awesome App",
@@ -57,7 +64,7 @@ func main() {
 		OnConflict: renderfs.Fail,
 	}
 
-	if err := renderfs.Copy(templateFS, "./output", opts); err != nil {
+	if err := renderfs.Copy(templateFS, writer, opts); err != nil {
 		panic(err)
 	}
 
@@ -98,10 +105,15 @@ import (
 
 	"github.com/flosch/pongo2/v6"
 	"github.com/your-org/renderfs"
+	"github.com/your-org/renderfs/writers"
 )
 
 func main() {
 	source := os.DirFS("./template-src")
+	writer, err := writers.NewOSWriter("./output")
+	if err != nil {
+		panic(err)
+	}
 
 	opts := renderfs.Options{
 		Context: pongo2.Context{
@@ -114,7 +126,7 @@ func main() {
 		OnConflict: renderfs.Overwrite,
 	}
 
-	if err := renderfs.Copy(source, "./output", opts); err != nil {
+	if err := renderfs.Copy(source, writer, opts); err != nil {
 		panic(err)
 	}
 
@@ -137,6 +149,7 @@ import (
 
 	"github.com/flosch/pongo2/v6"
 	"github.com/your-org/renderfs"
+	"github.com/your-org/renderfs/writers"
 )
 
 func main() {
@@ -152,13 +165,33 @@ func main() {
 		panic(err)
 	}
 
+	writer, err := writers.NewOSWriter("./output")
+	if err != nil {
+		panic(err)
+	}
+
 	opts := renderfs.Options{
 		Context: pongo2.Context{"project_name": "Zip Example"},
 	}
 
-	if err := renderfs.Copy(reader, "./output", opts); err != nil {
+	if err := renderfs.Copy(reader, writer, opts); err != nil {
 		panic(err)
 	}
+}
+```
+
+### In-memory dry runs (`MemoryWriter`)
+
+For previews or tests, render everything into memory:
+
+```go
+memWriter := writers.NewMemoryWriter()
+if err := renderfs.Copy(sourceFS, memWriter, renderfs.Options{Context: ctx}); err != nil {
+	log.Fatal(err)
+}
+
+for path, contents := range memWriter.Contents() {
+	fmt.Printf("%s:\n%s\n", path, contents)
 }
 ```
 
