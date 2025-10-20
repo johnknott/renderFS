@@ -1,6 +1,15 @@
 # RenderFS
 
-RenderFS is a lightweight Go library for rendering project templates from any `fs.FS` source onto disk using the [Pongo2](https://github.com/flosch/pongo2) templating engine. It powers templated copies for the Stencil scaffolder while keeping the core rendering logic fast, deterministic, and test friendly. We took inspiration from the excellent [copier](https://github.com/copier-org/copier) project, but wanted something Go-native, dependency-free, and small enough to embed in other tooling.
+RenderFS is a lightweight Go library for rendering project templates from any `fs.FS` source onto disk using the [Pongo2](https://github.com/flosch/pongo2) templating engine. It was inspired by the excellent [copier](https://github.com/copier-org/copier) project, but we wanted something Go-native, dependency-free, and embeddable in any toolchain.
+
+Because it accepts a generic `fs.FS`, you can feed RenderFS templates from:
+
+- `embed.FS` / `//go:embed`
+- `os.DirFS`
+- `fstest.MapFS`
+- `zip.Reader` or `zipfs` implementations
+- network-backed filesystems (e.g. `httpfs`, S3-backed `fs.FS`, etc.)
+- any custom virtual filesystem that implements the standard interface
 
 ## Features
 
@@ -20,8 +29,6 @@ go get github.com/your-org/renderfs
 ## Examples
 
 ### Embedded templates (`//go:embed`)
-
-Most Stencil integrations ship templates inside the binary. RenderFS can work directly with an embedded filesystem:
 
 ```go
 package main
@@ -115,6 +122,46 @@ func main() {
 ```
 
 The directory `template-src` can then be committed alongside your project and exercised or updated without re-building the binary.
+
+### Zip archives (`zip.Reader`)
+
+Templates packaged as zip files can be consumed via `zip.Reader`:
+
+```go
+package main
+
+import (
+	"archive/zip"
+	"os"
+
+	"github.com/flosch/pongo2/v6"
+	"github.com/your-org/renderfs"
+)
+
+func main() {
+	file, err := os.Open("templates.zip")
+	if err != nil {
+		panic(err)
+	}
+	defer file.Close()
+
+	stat, _ := file.Stat()
+	reader, err := zip.NewReader(file, stat.Size())
+	if err != nil {
+		panic(err)
+	}
+
+	opts := renderfs.Options{
+		Context: pongo2.Context{"project_name": "Zip Example"},
+	}
+
+	if err := renderfs.Copy(reader, "./output", opts); err != nil {
+		panic(err)
+	}
+}
+```
+
+Any other filesystem adapter that satisfies `fs.FS` follows the same pattern.
 
 ## Ignore Patterns
 
