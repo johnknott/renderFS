@@ -18,6 +18,7 @@ Because it accepts a generic `fs.FS`, you can feed RenderFS templates from:
 - Conditional file and directory creation (empty rendered paths are skipped).
 - `.renderfs-ignore` (or explicit patterns) using gitignore semantics.
 - Preserve source file permissions, including executable bits.
+- Fail fast when templates reference missing context variables (RenderFS validates referenced identifiers before handing them to Pongo2).
 - Conflict handling modes: overwrite, skip, or fail fast.
 
 ## Installation
