@@ -10,3 +10,6 @@ run = "go fmt ./..."
 
 [tasks.test]
 run = "go test ./..."
+
+[tasks.build]
+run = "go build ./..."
